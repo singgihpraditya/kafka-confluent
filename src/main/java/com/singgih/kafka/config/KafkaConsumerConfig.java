@@ -78,7 +78,7 @@ public class KafkaConsumerConfig {
     private String buildJaasConfig() {
         return String.format(
             "com.sun.security.auth.module.Krb5LoginModule required " +
-            "useKeyTab=true storeKey=true keyTab=\"%s\" principal=\"%s\";",
+            "useKeyTab=true doNotPrompt=true storeKey=true keyTab=\"%s\" principal=\"%s\";",
             keytabPath, principal);
     }
 
