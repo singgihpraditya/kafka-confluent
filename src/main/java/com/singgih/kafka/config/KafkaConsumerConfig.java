@@ -3,6 +3,7 @@ package com.singgih.kafka.config;
 import io.confluent.kafka.serializers.KafkaAvroDeserializer;
 import io.confluent.kafka.serializers.KafkaAvroDeserializerConfig;
 import org.apache.kafka.clients.consumer.ConsumerConfig;
+import org.apache.kafka.common.config.SaslConfigs;
 import org.apache.kafka.common.serialization.StringDeserializer;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.context.annotation.Bean;
@@ -31,6 +32,21 @@ public class KafkaConsumerConfig {
     @Value("${kafka.schema-registry.url}")
     private String schemaRegistryUrl;
 
+    @Value("${kafka.security.protocol:PLAINTEXT}")
+    private String securityProtocol;
+
+    @Value("${kafka.security.sasl.mechanism:GSSAPI}")
+    private String saslMechanism;
+
+    @Value("${kafka.security.sasl.kerberos-service-name:kafka}")
+    private String kerberosServiceName;
+
+    @Value("${kafka.security.keytab-path:}")
+    private String keytabPath;
+
+    @Value("${kafka.security.principal:}")
+    private String principal;
+
     /**
      * Membuat dan mengkonfigurasi ConsumerFactory untuk membaca pesan Avro dari Kafka.
      * Menggunakan KafkaAvroDeserializer dengan flag SPECIFIC_AVRO_READER agar hasil deserialisasi
@@ -48,7 +64,22 @@ public class KafkaConsumerConfig {
         props.put(ConsumerConfig.VALUE_DESERIALIZER_CLASS_CONFIG, KafkaAvroDeserializer.class);
         props.put(KafkaAvroDeserializerConfig.SCHEMA_REGISTRY_URL_CONFIG, schemaRegistryUrl);
         props.put(KafkaAvroDeserializerConfig.SPECIFIC_AVRO_READER_CONFIG, true);
+
+        if ("SASL_PLAINTEXT".equals(securityProtocol) || "SASL_SSL".equals(securityProtocol)) {
+            props.put("security.protocol", securityProtocol);
+            props.put(SaslConfigs.SASL_MECHANISM, saslMechanism);
+            props.put(SaslConfigs.SASL_KERBEROS_SERVICE_NAME, kerberosServiceName);
+            props.put(SaslConfigs.SASL_JAAS_CONFIG, buildJaasConfig());
+        }
+
         return new DefaultKafkaConsumerFactory<>(props);
+    }
+
+    private String buildJaasConfig() {
+        return String.format(
+            "com.sun.security.auth.module.Krb5LoginModule required " +
+            "useKeyTab=true doNotPrompt=true storeKey=true keyTab=\"%s\" principal=\"%s\";",
+            keytabPath, principal);
     }
 
     /**
