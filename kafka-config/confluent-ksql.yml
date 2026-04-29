@@ -1,0 +1,358 @@
+version: '3.8'
+
+# =====================================================================
+# Confluent Platform + Kerberos + Kafka Connect (JDBC/MySQL) + ksqlDB
+#
+# Realm        : CONFLUENT.LOCAL
+# KDC hostname : kdc
+#
+# Principals yang dibuat otomatis:
+#   kafka/kafka@CONFLUENT.LOCAL   -> broker keytab : /keytabs/kafka.keytab
+#   client@CONFLUENT.LOCAL        -> test client    : /keytabs/client.keytab
+#
+# Listener Kafka:
+#   Port 9093  -> SASL_PLAINTEXT (Kerberos) untuk client eksternal
+#   Port 29092 -> PLAINTEXT_INTERNAL       untuk komunikasi antar container
+#
+# Layanan Tambahan:
+#   MySQL         : 3306   — db: confluent_db  user: kafka_user / kafka_pass
+#   Kafka Connect : 8083   — REST API (JDBC Source/Sink connector)
+#   ksqlDB Server : 8088   — REST API + WebSocket
+#   ksqlDB CLI    : container interaktif (lihat cara akses di bawah)
+#
+# Cara menjalankan:
+#   docker compose -f confluent-ksql.yml up --build
+#
+# Cara akses ksqlDB CLI:
+#   docker exec -it ksqldb-cli ksql http://ksqldb-server:8088
+#
+# Cara register MySQL Source Connector (setelah semua container up):
+#   curl -X POST http://localhost:8083/connectors \
+#     -H "Content-Type: application/json" \
+#     -d '{
+#       "name": "mysql-source",
+#       "config": {
+#         "connector.class": "io.confluent.connect.jdbc.JdbcSourceConnector",
+#         "connection.url": "jdbc:mysql://mysql:3306/confluent_db",
+#         "connection.user": "kafka_user",
+#         "connection.password": "kafka_pass",
+#         "mode": "timestamp+incrementing",
+#         "incrementing.column.name": "id",
+#         "timestamp.column.name": "updated_at",
+#         "timestamp.delay.interval.ms": "1000",
+#         "topic.prefix": "mysql.",
+#         "poll.interval.ms": "5000"
+#       }
+#     }'
+#
+# Cara register MySQL Sink Connector:
+#   curl -X POST http://localhost:8083/connectors \
+#     -H "Content-Type: application/json" \
+#     -d '{
+#       "name": "mysql-sink",
+#       "config": {
+#         "connector.class": "io.confluent.connect.jdbc.JdbcSinkConnector",
+#         "connection.url": "jdbc:mysql://mysql:3306/confluent_db",
+#         "connection.user": "kafka_user",
+#         "connection.password": "kafka_pass",
+#         "topics": "mysql.orders",
+#         "auto.create": "true",
+#         "insert.mode": "upsert",
+#         "pk.mode": "record_key"
+#       }
+#     }'
+# =====================================================================
+
+networks:
+  confluent-net:
+    driver: bridge
+
+services:
+
+  # ===================================================================
+  # Kerberos KDC (Key Distribution Center)
+  # Build dari ./kerberos/Dockerfile.kdc
+  # ===================================================================
+  kdc:
+    build:
+      context: ./kerberos
+      dockerfile: Dockerfile.kdc
+    container_name: kdc
+    hostname: kdc
+    networks:
+      - confluent-net
+    volumes:
+      - kdc-data:/var/lib/krb5kdc
+      - keytabs:/keytabs
+    ports:
+      - "88:88/udp"
+      - "88:88/tcp"
+      - "749:749/tcp"
+    healthcheck:
+      test: ["CMD-SHELL", "test -f /keytabs/.kdc_ready"]
+      interval: 5s
+      timeout: 10s
+      retries: 60
+      start_period: 15s
+
+  # ===================================================================
+  # ZooKeeper — PLAINTEXT (tidak pakai Kerberos)
+  # ===================================================================
+  zookeeper:
+    image: confluentinc/cp-zookeeper:7.6.0
+    container_name: zookeeper
+    hostname: zookeeper
+    depends_on:
+      kdc:
+        condition: service_healthy
+    networks:
+      - confluent-net
+    ports:
+      - "2181:2181"
+    environment:
+      ZOOKEEPER_CLIENT_PORT: 2181
+      ZOOKEEPER_TICK_TIME: 2000
+
+  # ===================================================================
+  # Kafka Broker
+  #   - SASL_PLAINTEXT:9093      -> autentikasi Kerberos (client luar)
+  #   - PLAINTEXT_INTERNAL:29092 -> komunikasi internal (Connect, ksqlDB)
+  # ===================================================================
+  kafka:
+    image: confluentinc/cp-kafka:7.6.0
+    container_name: kafka
+    hostname: kafka
+    depends_on:
+      zookeeper:
+        condition: service_started
+      kdc:
+        condition: service_healthy
+    networks:
+      - confluent-net
+    ports:
+      - "9093:9093"    # SASL_PLAINTEXT — untuk client Kerberos dari host
+      - "29092:29092"  # PLAINTEXT_INTERNAL — akses internal
+    volumes:
+      - keytabs:/keytabs:ro
+      - ./kafka/jaas/kafka_server_jaas.conf:/etc/kafka/kafka_server_jaas.conf:ro
+      - ./kerberos/krb5.conf:/etc/krb5.conf:ro
+    environment:
+      KAFKA_BROKER_ID: 1
+      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
+
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: SASL_PLAINTEXT:SASL_PLAINTEXT,PLAINTEXT_INTERNAL:PLAINTEXT
+      KAFKA_LISTENERS: SASL_PLAINTEXT://0.0.0.0:9093,PLAINTEXT_INTERNAL://0.0.0.0:29092
+      KAFKA_ADVERTISED_LISTENERS: SASL_PLAINTEXT://kafka:9093,PLAINTEXT_INTERNAL://kafka:29092
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT_INTERNAL
+
+      KAFKA_SASL_ENABLED_MECHANISMS: GSSAPI
+      KAFKA_SASL_KERBEROS_SERVICE_NAME: kafka
+
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+
+      KAFKA_LISTENER_NAME_SASL__PLAINTEXT_GSSAPI_SASL_JAAS_CONFIG: >-
+        com.sun.security.auth.module.Krb5LoginModule required
+        useKeyTab=true
+        storeKey=true
+        keyTab="/keytabs/kafka.keytab"
+        principal="kafka/kafka@CONFLUENT.LOCAL";
+
+      KAFKA_OPTS: >-
+        -Djava.security.krb5.conf=/etc/krb5.conf
+        -Dzookeeper.sasl.client=false
+
+  # ===================================================================
+  # Schema Registry — terhubung ke Kafka via PLAINTEXT internal
+  # ===================================================================
+  schema-registry:
+    image: confluentinc/cp-schema-registry:7.6.0
+    container_name: schema-registry
+    hostname: schema-registry
+    depends_on:
+      - kafka
+    networks:
+      - confluent-net
+    ports:
+      - "8081:8081"
+    environment:
+      SCHEMA_REGISTRY_HOST_NAME: schema-registry
+      SCHEMA_REGISTRY_LISTENERS: http://0.0.0.0:8081
+      SCHEMA_REGISTRY_KAFKASTORE_BOOTSTRAP_SERVERS: PLAINTEXT://kafka:29092
+      SCHEMA_REGISTRY_ACCESS_CONTROL_ALLOW_ORIGIN: "*"
+      SCHEMA_REGISTRY_ACCESS_CONTROL_ALLOW_METHODS: "GET,POST,PUT,OPTIONS"
+
+  # ===================================================================
+  # MySQL 8.0
+  #   db       : confluent_db
+  #   root     : rootpassword
+  #   app user : kafka_user / kafka_pass
+  #
+  # Untuk CDC (Debezium), aktifkan binlog di command:
+  #   --log-bin=mysql-bin
+  #   --binlog-format=ROW
+  # ===================================================================
+  mysql:
+    image: mysql:8.0
+    container_name: mysql
+    hostname: mysql
+    networks:
+      - confluent-net
+    ports:
+      - "3306:3306"
+    command:
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_unicode_ci
+      - --default-authentication-plugin=mysql_native_password
+      - --authentication-policy=mysql_native_password
+    environment:
+      MYSQL_ROOT_PASSWORD: rootpassword
+      MYSQL_DATABASE: confluent_db
+      MYSQL_USER: kafka_user
+      MYSQL_PASSWORD: kafka_pass
+    volumes:
+      - mysql-data:/var/lib/mysql
+      - ./mysql/init.sql:/docker-entrypoint-initdb.d/01-init.sql:ro
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "root", "-prootpassword"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+
+  # ===================================================================
+  # Kafka Connect — JDBC Source/Sink Connector
+  # Build dari ./connect/Dockerfile.connect
+  # (sudah include: kafka-connect-jdbc:10.7.4 + mysql-connector-j:8.0.33)
+  #
+  # REST API : http://localhost:8083
+  # GET  /connectors          -> daftar connector aktif
+  # GET  /connector-plugins   -> daftar plugin tersedia
+  # ===================================================================
+  kafka-connect:
+    build:
+      context: ./connect
+      dockerfile: Dockerfile.connect
+    container_name: kafka-connect
+    hostname: kafka-connect
+    depends_on:
+      kafka:
+        condition: service_started
+      schema-registry:
+        condition: service_started
+      mysql:
+        condition: service_healthy
+    networks:
+      - confluent-net
+    ports:
+      - "8083:8083"
+    environment:
+      CONNECT_BOOTSTRAP_SERVERS: kafka:29092
+      CONNECT_REST_ADVERTISED_HOST_NAME: kafka-connect
+      CONNECT_REST_PORT: 8083
+      CONNECT_GROUP_ID: connect-cluster
+
+      # Internal topics untuk menyimpan state cluster Connect
+      CONNECT_CONFIG_STORAGE_TOPIC: _connect-configs
+      CONNECT_OFFSET_STORAGE_TOPIC: _connect-offsets
+      CONNECT_STATUS_STORAGE_TOPIC: _connect-status
+      CONNECT_CONFIG_STORAGE_REPLICATION_FACTOR: 1
+      CONNECT_OFFSET_STORAGE_REPLICATION_FACTOR: 1
+      CONNECT_STATUS_STORAGE_REPLICATION_FACTOR: 1
+      CONNECT_OFFSET_FLUSH_INTERVAL_MS: 10000
+
+      # Converter: key sebagai String, value sebagai Avro (via Schema Registry)
+      CONNECT_KEY_CONVERTER: org.apache.kafka.connect.storage.StringConverter
+      CONNECT_VALUE_CONVERTER: io.confluent.connect.avro.AvroConverter
+      CONNECT_VALUE_CONVERTER_SCHEMA_REGISTRY_URL: http://schema-registry:8081
+
+      # Plugin path
+      CONNECT_PLUGIN_PATH: /usr/share/java,/usr/share/confluent-hub-components
+
+      # Kurangi log noise dari library internal
+      CONNECT_LOG4J_LOGGERS: >-
+        org.apache.zookeeper=ERROR,
+        org.I0Itec.zkclient=ERROR,
+        org.reflections=ERROR
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:8083/connectors || exit 1"]
+      interval: 15s
+      timeout: 10s
+      retries: 12
+      start_period: 60s
+
+  # ===================================================================
+  # ksqlDB Server
+  # Terhubung ke: Kafka (PLAINTEXT), Schema Registry, Kafka Connect
+  #
+  # REST API : http://localhost:8088
+  # ===================================================================
+  ksqldb-server:
+    image: confluentinc/cp-ksqldb-server:7.6.0
+    container_name: ksqldb-server
+    hostname: ksqldb-server
+    depends_on:
+      kafka:
+        condition: service_started
+      schema-registry:
+        condition: service_started
+      kafka-connect:
+        condition: service_healthy
+    networks:
+      - confluent-net
+    ports:
+      - "8088:8088"
+    environment:
+      KSQL_BOOTSTRAP_SERVERS: kafka:29092
+      KSQL_LISTENERS: http://0.0.0.0:8088
+      KSQL_KSQL_SCHEMA_REGISTRY_URL: http://schema-registry:8081
+
+      # Integrasi dengan Kafka Connect untuk CREATE CONNECTOR via ksqlDB
+      KSQL_KSQL_CONNECT_URL: http://kafka-connect:8083
+
+      KSQL_KSQL_SERVICE_ID: ksql_confluent_
+      KSQL_KSQL_STREAMS_AUTO_OFFSET_RESET: earliest
+
+      # Replikasi topic internal ksqlDB (single broker = 1)
+      KSQL_KSQL_INTERNAL_TOPIC_REPLICAS: 1
+      KSQL_KSQL_LOGGING_PROCESSING_TOPIC_REPLICATION_FACTOR: 1
+      KSQL_KSQL_LOGGING_PROCESSING_TOPIC_PARTITIONS: 1
+      KSQL_KSQL_LOGGING_PROCESSING_STREAM_AUTO_CREATE: "true"
+      KSQL_KSQL_LOGGING_PROCESSING_TOPIC_AUTO_CREATE: "true"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:8088/healthcheck || exit 1"]
+      interval: 15s
+      timeout: 10s
+      retries: 12
+      start_period: 60s
+
+  # ===================================================================
+  # ksqlDB CLI — shell interaktif
+  #
+  # Cara akses:
+  #   docker exec -it ksqldb-cli ksql http://ksqldb-server:8088
+  #
+  # Contoh query setelah masuk CLI:
+  #   SHOW TOPICS;
+  #   SHOW STREAMS;
+  #   PRINT 'mysql.orders' FROM BEGINNING;
+  #   CREATE STREAM orders_stream (id INT, product VARCHAR, qty INT)
+  #     WITH (KAFKA_TOPIC='mysql.orders', VALUE_FORMAT='AVRO');
+  # ===================================================================
+  ksqldb-cli:
+    image: confluentinc/cp-ksqldb-cli:7.6.0
+    container_name: ksqldb-cli
+    hostname: ksqldb-cli
+    depends_on:
+      ksqldb-server:
+        condition: service_healthy
+    networks:
+      - confluent-net
+    entrypoint: /bin/sh
+    tty: true
+
+volumes:
+  kdc-data:     # KDC database
+  keytabs:      # keytab files (shared antara kdc dan kafka)
+  mysql-data:   # MySQL data persistent

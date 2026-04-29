@@ -1,0 +1,161 @@
+version: '3.8'
+
+# =====================================================================
+# Confluent Platform + Kerberos Authentication
+#
+# Realm        : CONFLUENT.LOCAL
+# KDC hostname : kdc
+#
+# Principals yang dibuat otomatis:
+#   kafka/kafka@CONFLUENT.LOCAL       -> broker keytab: /keytabs/kafka.keytab
+#   client@CONFLUENT.LOCAL            -> test client  (password: client123)
+#                                        keytab: /keytabs/client.keytab
+#
+# Listener Kafka:
+#   Port 9093  -> SASL_PLAINTEXT (Kerberos) untuk client eksternal
+#   Port 29092 -> PLAINTEXT_INTERNAL       untuk komunikasi antar container
+#
+# Cara menjalankan:
+#   docker compose -f confluent-kerberos.yml up --build
+#
+# Cara connect sebagai client Kerberos (setelah container up):
+#   1. Copy client.keytab dari volume:
+#      docker cp kdc:/keytabs/client.keytab .
+#      docker cp kdc:/keytabs/krb5.conf .   (atau pakai ./kerberos/krb5.conf)
+#   2. Jalankan kinit:
+#      KRB5_CONFIG=./kerberos/krb5.conf kinit -kt client.keytab client@CONFLUENT.LOCAL
+#   3. Gunakan kafka-console-producer/consumer dengan kafka/client.properties
+# =====================================================================
+
+networks:
+  confluent-net:
+    driver: bridge
+
+services:
+
+  # ===================================================================
+  # Kerberos KDC (Key Distribution Center)
+  # Build dari ./kerberos/Dockerfile.kdc
+  # ===================================================================
+  kdc:
+    build:
+      context: ./kerberos
+      dockerfile: Dockerfile.kdc
+    container_name: kdc
+    hostname: kdc
+    networks:
+      - confluent-net
+    volumes:
+      - kdc-data:/var/lib/krb5kdc
+      - keytabs:/keytabs
+    ports:
+      - "88:88/udp"
+      - "88:88/tcp"
+      - "749:749/tcp"
+    healthcheck:
+      # Marker file dibuat oleh create-principals.sh setelah semua keytab siap
+      test: ["CMD-SHELL", "test -f /keytabs/.kdc_ready"]
+      interval: 5s
+      timeout: 10s
+      retries: 60
+      start_period: 15s
+
+  # ===================================================================
+  # ZooKeeper — PLAINTEXT (tidak pakai Kerberos)
+  # Menunggu KDC sehat agar timing startup konsisten
+  # ===================================================================
+  zookeeper:
+    image: confluentinc/cp-zookeeper:7.6.0
+    container_name: zookeeper
+    hostname: zookeeper
+    depends_on:
+      kdc:
+        condition: service_healthy
+    networks:
+      - confluent-net
+    ports:
+      - "2181:2181"
+    environment:
+      ZOOKEEPER_CLIENT_PORT: 2181
+      ZOOKEEPER_TICK_TIME: 2000
+
+  # ===================================================================
+  # Kafka Broker
+  #   - SASL_PLAINTEXT:9093  -> autentikasi Kerberos untuk client luar
+  #   - PLAINTEXT_INTERNAL:29092 -> komunikasi internal (ZK, inter-broker)
+  # ===================================================================
+  kafka:
+    image: confluentinc/cp-kafka:7.6.0
+    container_name: kafka
+    hostname: kafka
+    depends_on:
+      zookeeper:
+        condition: service_started
+      kdc:
+        condition: service_healthy
+    networks:
+      - confluent-net
+    ports:
+      - "9093:9093"    # SASL_PLAINTEXT — untuk client Kerberos dari host
+      - "29092:29092"  # PLAINTEXT_INTERNAL — akses internal
+    volumes:
+      - keytabs:/keytabs:ro
+      - ./kafka/jaas/kafka_server_jaas.conf:/etc/kafka/kafka_server_jaas.conf:ro
+      - ./kerberos/krb5.conf:/etc/krb5.conf:ro
+    environment:
+      KAFKA_BROKER_ID: 1
+      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
+
+      # Listener definitions
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: SASL_PLAINTEXT:SASL_PLAINTEXT,PLAINTEXT_INTERNAL:PLAINTEXT
+      KAFKA_LISTENERS: SASL_PLAINTEXT://0.0.0.0:9093,PLAINTEXT_INTERNAL://0.0.0.0:29092
+      KAFKA_ADVERTISED_LISTENERS: SASL_PLAINTEXT://kafka:9093,PLAINTEXT_INTERNAL://kafka:29092
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT_INTERNAL
+
+      # SASL/Kerberos settings
+      KAFKA_SASL_ENABLED_MECHANISMS: GSSAPI
+      KAFKA_SASL_KERBEROS_SERVICE_NAME: kafka
+
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+
+      # JAAS config spesifik per listener+mekanisme — format:
+      # listener.name.<listener>.<mechanism>.sasl.jaas.config
+      # Env var: KAFKA_ + tiap "." -> "_", tiap "_" -> "__"
+      # sasl_plaintext -> SASL__PLAINTEXT
+      KAFKA_LISTENER_NAME_SASL__PLAINTEXT_GSSAPI_SASL_JAAS_CONFIG: >-
+        com.sun.security.auth.module.Krb5LoginModule required
+        useKeyTab=true
+        storeKey=true
+        keyTab="/keytabs/kafka.keytab"
+        principal="kafka/kafka@CONFLUENT.LOCAL";
+
+      # JVM options: hanya KRB5 config + disable ZK SASL (tanpa auth.login.config)
+      KAFKA_OPTS: >-
+        -Djava.security.krb5.conf=/etc/krb5.conf
+        -Dzookeeper.sasl.client=false
+
+  # ===================================================================
+  # Schema Registry — terhubung ke Kafka via PLAINTEXT internal
+  # ===================================================================
+  schema-registry:
+    image: confluentinc/cp-schema-registry:7.6.0
+    container_name: schema-registry
+    hostname: schema-registry
+    depends_on:
+      - kafka
+    networks:
+      - confluent-net
+    ports:
+      - "8081:8081"
+    environment:
+      SCHEMA_REGISTRY_HOST_NAME: schema-registry
+      SCHEMA_REGISTRY_LISTENERS: http://0.0.0.0:8081
+      SCHEMA_REGISTRY_KAFKASTORE_BOOTSTRAP_SERVERS: PLAINTEXT://kafka:29092
+      SCHEMA_REGISTRY_ACCESS_CONTROL_ALLOW_ORIGIN: "*"
+      SCHEMA_REGISTRY_ACCESS_CONTROL_ALLOW_METHODS: "GET,POST,PUT,OPTIONS"
+
+volumes:
+  kdc-data:   # menyimpan KDC database
+  keytabs:    # keytab files yang di-share antar container
