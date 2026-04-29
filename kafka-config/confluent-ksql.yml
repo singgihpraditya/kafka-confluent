@@ -36,8 +36,10 @@ version: '3.8'
 #         "connection.url": "jdbc:mysql://mysql:3306/confluent_db",
 #         "connection.user": "kafka_user",
 #         "connection.password": "kafka_pass",
-#         "mode": "incrementing",
+#         "mode": "timestamp+incrementing",
 #         "incrementing.column.name": "id",
+#         "timestamp.column.name": "updated_at",
+#         "timestamp.delay.interval.ms": "1000",
 #         "topic.prefix": "mysql.",
 #         "poll.interval.ms": "5000"
 #       }
@@ -203,6 +205,7 @@ services:
       - --character-set-server=utf8mb4
       - --collation-server=utf8mb4_unicode_ci
       - --default-authentication-plugin=mysql_native_password
+      - --authentication-policy=mysql_native_password
     environment:
       MYSQL_ROOT_PASSWORD: rootpassword
       MYSQL_DATABASE: confluent_db
@@ -210,8 +213,7 @@ services:
       MYSQL_PASSWORD: kafka_pass
     volumes:
       - mysql-data:/var/lib/mysql
-      # Opsional: mount init SQL untuk membuat tabel awal
-      # - ./mysql/init.sql:/docker-entrypoint-initdb.d/01-init.sql:ro
+      - ./mysql/init.sql:/docker-entrypoint-initdb.d/01-init.sql:ro
     healthcheck:
       test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "root", "-prootpassword"]
       interval: 10s

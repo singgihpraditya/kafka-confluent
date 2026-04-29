@@ -11,6 +11,9 @@ import java.io.File;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.attribute.BasicFileAttributes;
+import java.time.ZoneId;
+import java.time.format.DateTimeFormatter;
 
 @Configuration
 @ConditionalOnExpression("'${kafka.security.protocol:PLAINTEXT}'.equals('SASL_PLAINTEXT') or '${kafka.security.protocol:PLAINTEXT}'.equals('SASL_SSL')")
@@ -53,6 +56,10 @@ public class KerberosConfig {
                 ". Jalankan: docker cp kdc:/keytabs/client.keytab " + keytabPath);
         }
 
+        // Log waktu modifikasi keytab — berguna mendeteksi keytab basi setelah Docker di-restart.
+        // Jika 'Checksum failed', copy ulang keytab: docker cp kdc:/keytabs/client.keytab <path>
+        logKeytabModifiedTime(keytabFile);
+
         String resolvedKrb5Path = (kdcHost != null && !kdcHost.isBlank())
                 ? buildResolvedKrb5Conf()
                 : krb5ConfPath;
@@ -60,6 +67,24 @@ public class KerberosConfig {
         System.setProperty("java.security.krb5.conf", resolvedKrb5Path);
         log.info("Kerberos aktif | principal: {} | krb5.conf: {} | keytab: {}",
                 principal, resolvedKrb5Path, keytabPath);
+    }
+
+    /**
+     * Mencatat waktu terakhir file keytab dimodifikasi ke log.
+     * Keytab yang sudah lama (lebih tua dari uptime Docker terakhir) kemungkinan basi.
+     */
+    private void logKeytabModifiedTime(File keytabFile) {
+        try {
+            BasicFileAttributes attr = Files.readAttributes(keytabFile.toPath(), BasicFileAttributes.class);
+            String lastModified = attr.lastModifiedTime()
+                    .toInstant()
+                    .atZone(ZoneId.systemDefault())
+                    .format(DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss"));
+            log.info("Keytab terakhir diperbarui: {} — jika 'Checksum failed', " +
+                     "jalankan: docker cp kdc:/keytabs/client.keytab {}", lastModified, keytabPath);
+        } catch (IOException e) {
+            log.warn("Tidak dapat membaca atribut keytab: {}", e.getMessage());
+        }
     }
 
     /**

@@ -22,6 +22,6 @@ public class OrdersKafkaListener {
         log.info("[Orders] topic: {}, partition: {}, offset: {}",
                 record.topic(), record.partition(), record.offset());
         log.info("[Orders] id: {}, product: {}, qty: {}, created_at: {}",
-                order.get("id"), order.get("product"), order.get("qty"), order.get("created_at"));
+                order.get("id"), order.get("product"), order.get("qty"), order.get("updated_at"));
     }
 }
