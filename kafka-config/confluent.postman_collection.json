@@ -1,0 +1,84 @@
+{
+	"info": {
+		"_postman_id": "065f0c59-3911-4844-b4dc-30d39966e572",
+		"name": "confluent",
+		"schema": "https://schema.getpostman.com/json/collection/v2.0.0/collection.json"
+	},
+	"item": [
+		{
+			"name": "register-schema",
+			"request": {
+				"method": "POST",
+				"header": [
+					{
+						"key": "Content-Type",
+						"value": "application/vnd.schemaregistry.v1+json"
+					}
+				],
+				"body": {
+					"mode": "raw",
+					"raw": "{\n    \"schema\": \"{\\\"type\\\":\\\"record\\\",\\\"name\\\":\\\"User\\\",\\\"fields\\\":[{\\\"name\\\":\\\"id\\\",\\\"type\\\":\\\"int\\\"},{\\\"name\\\":\\\"name\\\",\\\"type\\\":\\\"string\\\"}]}\"\n}"
+				},
+				"url": "http://192.168.56.101:8081/subjects/my-topic-value/versions"
+			},
+			"response": []
+		},
+		{
+			"name": "get-schema",
+			"protocolProfileBehavior": {
+				"disableBodyPruning": true
+			},
+			"request": {
+				"method": "GET",
+				"header": [
+					{
+						"key": "Content-Type",
+						"value": "application/vnd.schemaregistry.v1+json"
+					}
+				],
+				"body": {
+					"mode": "raw",
+					"raw": "{\n    \"schema\": \"{\\\"type\\\":\\\"record\\\",\\\"name\\\":\\\"User\\\",\\\"fields\\\":[{\\\"name\\\":\\\"id\\\",\\\"type\\\":\\\"int\\\"},{\\\"name\\\":\\\"name\\\",\\\"type\\\":\\\"string\\\"}]}\"\n}"
+				},
+				"url": "http://192.168.56.101:8081/subjects"
+			},
+			"response": []
+		},
+		{
+			"name": "create-ksql-sink",
+			"request": {
+				"method": "POST",
+				"header": [
+					{
+						"key": "Content-Type",
+						"value": "application/json"
+					}
+				],
+				"body": {
+					"mode": "raw",
+					"raw": "{\n       \"name\": \"mysql-sink\",\n       \"config\": {\n         \"connector.class\": \"io.confluent.connect.jdbc.JdbcSinkConnector\",\n         \"connection.url\": \"jdbc:mysql://mysql:3306/confluent_db\",\n         \"connection.user\": \"kafka_user\",\n         \"connection.password\": \"kafka_pass\",\n         \"topics\": \"mysql.consumers\",\n         \"auto.create\": \"true\",\n         \"insert.mode\": \"upsert\",\n         \"pk.mode\": \"record_key\"\n       }\n     }"
+				},
+				"url": "http://localhost:8083/connectors"
+			},
+			"response": []
+		},
+		{
+			"name": "create-ksql-connectors",
+			"request": {
+				"method": "POST",
+				"header": [
+					{
+						"key": "Content-Type",
+						"value": "application/json"
+					}
+				],
+				"body": {
+					"mode": "raw",
+					"raw": "{\n      \"name\": \"mysql-consumers-source\",\n      \"config\": {\n        \"connector.class\": \"io.confluent.connect.jdbc.JdbcSourceConnector\",\n        \"connection.url\": \"jdbc:mysql://mysql:3306/confluent_db\",\n        \"connection.user\": \"kafka_user\",\n        \"connection.password\": \"kafka_pass\",\n        \"mode\": \"timestamp+incrementing\",\n        \"incrementing.column.name\": \"id\",\n        \"timestamp.column.name\": \"updated_at\",\n        \"timestamp.delay.interval.ms\": \"1000\",\n        \"topic.prefix\": \"mysql.\",\n        \"poll.interval.ms\": \"5000\",\n        \"table.whitelist\": \"consumers\"\n      }\n    }"
+				},
+				"url": "http://localhost:8083/connectors"
+			},
+			"response": []
+		}
+	]
+}

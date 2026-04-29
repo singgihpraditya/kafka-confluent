@@ -8,21 +8,21 @@ import org.springframework.kafka.annotation.KafkaListener;
 import org.springframework.stereotype.Component;
 
 @Component
-public class OrdersKafkaListener {
+public class ConsumersKafkaListener {
 
     private static final Logger log = LoggerFactory.getLogger(OrdersKafkaListener.class);
 
     @KafkaListener(
-            topics = "${kafka.topic.orders}",
+            topics = "${kafka.topic.consumers}",
             groupId = "orders-listener-group",
             containerFactory = "ordersListenerContainerFactory"
     )
     public void listen(ConsumerRecord<String, GenericRecord> record) {
-        GenericRecord order = record.value();
-        log.info("[Orders] topic: {}, partition: {}, offset: {}",
+        GenericRecord consumer = record.value();
+        log.info("[Consumer] topic: {}, partition: {}, offset: {}",
                 record.topic(), record.partition(), record.offset());
-        log.info("[Orders] id: {}, product: {}, qty: {}, created_at: {}",
-                order.get("id"), order.get("product"), order.get("qty"), order.get("updated_at"));
+        log.info("[Consumer] id: {}, product: {}, qty: {}, created_at: {}",
+                consumer.get("id"), consumer.get("product"), consumer.get("qty"), consumer.get("updated_at"));
     }
 }
 
